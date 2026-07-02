@@ -114,6 +114,33 @@ def load(path: str | Path) -> MeshGraph:
     return from_trimesh(mesh, source=path)
 
 
+def boundary_vertex_mask(graph: "MeshGraph") -> np.ndarray:
+    """Boolean mask of vertices touching an open boundary (a hole's rim).
+
+    A boundary edge belongs to exactly one face. The operators and signals are
+    unreliable there (an open one-ring has no well-defined curvature, and the
+    neighbor average is pulled inward even on a flat sheet), so detection both
+    skips these vertices and drops them from neighborhood statistics.
+    """
+    F = graph.faces
+    edges = np.sort(np.vstack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]]), axis=1)
+    uniq, counts = np.unique(edges, axis=0, return_counts=True)
+    boundary_edges = uniq[counts == 1]
+    mask = np.zeros(graph.n_vertices, dtype=bool)
+    mask[np.unique(boundary_edges)] = True
+    return mask
+
+
+def save(path: str | Path, vertices: np.ndarray, faces: np.ndarray) -> None:
+    """Write vertices/faces to a mesh file; format is chosen by the extension.
+
+    Only geometry is written (V1 looks at geometry alone), so any original UVs,
+    normals or materials are not carried over -- fine for the defect-fixing job.
+    """
+    tm = trimesh.Trimesh(vertices=np.asarray(vertices), faces=np.asarray(faces), process=False)
+    tm.export(Path(path))
+
+
 def from_trimesh(mesh: trimesh.Trimesh, source: Path | None = None) -> MeshGraph:
     """Build a :class:`MeshGraph` from an in-memory Trimesh (used by tests too)."""
     vertices = np.asarray(mesh.vertices, dtype=np.float64)

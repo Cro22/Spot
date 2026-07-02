@@ -16,7 +16,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from . import signals
-from .mesh import MeshGraph
+from .mesh import MeshGraph, boundary_vertex_mask
 
 _EPS = 1e-12
 
@@ -53,7 +53,8 @@ def kring_membership(graph: MeshGraph, k: int) -> sp.csr_matrix:
     return out.tocsr()
 
 
-def local_robust_z(signal: np.ndarray, kring: sp.csr_matrix, floor: float) -> np.ndarray:
+def local_robust_z(signal: np.ndarray, kring: sp.csr_matrix, floor: float,
+                   valid: np.ndarray | None = None) -> np.ndarray:
     """Robust z-score of each vertex's signal within its k-ring (median/MAD).
 
     ``floor`` is an additive floor on the scale, in the (dimensionless) units of
@@ -61,11 +62,18 @@ def local_robust_z(signal: np.ndarray, kring: sp.csr_matrix, floor: float) -> np
     noise into outliers: where the true local spread is ~0, the floor dominates
     and any sub-floor wobble scores ~0. A real, edge-scale defect is O(1) and
     still scores far above threshold.
+
+    ``valid`` optionally restricts which neighbors contribute to the median/MAD
+    (used to keep unreliable boundary vertices out of the statistics).
     """
     indptr, indices = kring.indptr, kring.indices
     z = np.zeros_like(signal, dtype=np.float64)
     for i in range(signal.shape[0]):
         neigh = indices[indptr[i] : indptr[i + 1]]
+        if valid is not None:
+            neigh = neigh[valid[neigh]]
+        if neigh.size == 0:
+            continue
         vals = signal[neigh]
         med = np.median(vals)
         scale = 1.4826 * np.median(np.abs(vals - med)) + floor
@@ -109,13 +117,17 @@ def detect(graph: MeshGraph, k: int = 2, threshold: float = 3.5,
     """
     components = signals.defect_signals(graph)
     kring = kring_membership(graph, k)
+    valid = ~boundary_vertex_mask(graph)  # boundary vertices don't count as neighbors
     component_z = {
-        name: local_robust_z(sig, kring, _FLOORS[name]) for name, sig in components.items()
+        name: local_robust_z(sig, kring, _FLOORS[name], valid)
+        for name, sig in components.items()
     }
     z = np.maximum.reduce(list(component_z.values()))
-    flags = z > threshold
+    # Boundary vertices are never flagged and never suppress an interior peak.
+    z_eff = np.where(valid, z, -np.inf)
+    flags = z_eff > threshold
     if suppress:
-        flags = _suppress_non_maxima(flags, z, kring)
+        flags = _suppress_non_maxima(flags, z_eff, kring)
     return DetectionResult(
         flags=flags,
         local_z=z,
