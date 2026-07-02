@@ -9,7 +9,10 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import correct, detect, report
+import json
+from pathlib import Path
+
+from . import bench, correct, detect, report
 from . import mesh as mesh_io
 
 
@@ -62,6 +65,40 @@ def _cmd_fix(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_bench(args: argparse.Namespace) -> int:
+    entries = bench.run_benchmark(k=args.k, threshold=args.threshold)
+
+    print("Feature false-positive benchmark (clean meshes -- every flag is a false positive)")
+    print(f"  {'mesh':10s} {'kind':8s} {'verts':>6s} {'flagged':>8s} {'fp_rate':>8s}")
+    for e in entries:
+        print(f"  {e.name:10s} {e.kind:8s} {e.n_vertices:6d} {e.n_flagged:8d} {100 * e.fp_rate:7.2f}%")
+
+    doc = bench.benchmark_document(entries, k=args.k, threshold=args.threshold)
+    agg = doc["aggregate"]
+    print(f"  feature FP rate: {100 * agg['feature_false_positive_rate']:.2f}% "
+          f"({agg['feature_false_positives']}/{agg['feature_vertices_total']})")
+
+    print("\nThreshold sweep on feature meshes (total false positives):")
+    for t, total in bench.threshold_sweep(k=args.k).items():
+        print(f"  threshold={t:.1f}  false_positives={total}")
+
+    if args.out_dir:
+        out = Path(args.out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        # The Suzanne "feature" benchmark class.
+        (out / "benchmark.json").write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        # Each mesh + the standard defect report (what Spot would do to it).
+        for name, (graph, kind) in bench.build_suite().items():
+            mesh_io.save(out / f"{name}.obj", graph.vertices, graph.faces)
+            det = detect.detect(graph, k=args.k, threshold=args.threshold)
+            corr = correct.taubin_fix(graph, det.flags)
+            rep = report.build_report(graph, det, corr,
+                                      parameters={"k": args.k, "threshold": args.threshold})
+            report.write_report(rep, out / f"{name}.report.json")
+        print(f"\nwrote benchmark -> {out / 'benchmark.json'} (+ per-mesh meshes and reports)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="spot", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -84,6 +121,16 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Per-vertex displacement cap, in local neighborhood-scale units.")
     p_fix.add_argument("--view", action="store_true", help="Open a before/after polyscope view.")
     p_fix.set_defaults(func=_cmd_fix)
+
+    p_bench = sub.add_parser(
+        "bench",
+        help="Measure V1's false positives on genuine features (Suzanne's benchmark).",
+    )
+    p_bench.add_argument("--out-dir", dest="out_dir",
+                         help="Write the benchmark class + per-mesh reports here.")
+    p_bench.add_argument("--k", type=int, default=2, help="k-ring radius for the local outlier test.")
+    p_bench.add_argument("--threshold", type=float, default=3.5, help="Local z-score flag threshold.")
+    p_bench.set_defaults(func=_cmd_bench)
 
     return parser
 
